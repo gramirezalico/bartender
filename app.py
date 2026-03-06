@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -13,14 +15,24 @@ load_dotenv()
 
 app = Flask(__name__)
 
+SCP_TIMEOUT_SECONDS = 30
 
-def normalize_unc_path(raw_path: str) -> str:
-    cleaned = raw_path.strip()
-    if cleaned.startswith("\\\\"):
-        return cleaned
-    if cleaned.startswith("//"):
-        return "\\\\" + cleaned[2:].replace("/", "\\")
-    return cleaned
+
+def is_scp_path(path: str) -> bool:
+    """Return True if *path* looks like an SCP remote path ([user@]host:/remote/path)."""
+    stripped = path.strip()
+    # Must contain ':' and the part before ':' must have at least 2 characters
+    # to avoid matching Windows drive letters like 'C:/path' (colon at index 1).
+    colon_idx = stripped.find(":")
+    if colon_idx <= 1:
+        return False
+    host_part = stripped[:colon_idx]
+    # SCP host parts never contain path separators
+    if "/" in host_part or "\\" in host_part:
+        return False
+    # The character after ':' should start an absolute path
+    after_colon = stripped[colon_idx + 1 :]
+    return after_colon.startswith("/")
 
 
 def serialize_cell(value: Any) -> str:
@@ -91,28 +103,60 @@ def write_csv() -> tuple[Any, int]:
     if not isinstance(include_header, bool):
         return jsonify({"error": "'include_header' debe ser boolean"}), 400
 
-    unc_path = normalize_unc_path(destination)
-    target_path = Path(unc_path)
+    dest = destination.strip()
 
-    try:
-        with target_path.open("w", newline="", encoding="utf-8-sig") as csv_file:
-            writer = csv.writer(csv_file)
+    if is_scp_path(dest):
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+        try:
+            try:
+                csv_file = os.fdopen(tmp_fd, "w", newline="", encoding="utf-8-sig")
+            except Exception:
+                os.close(tmp_fd)
+                raise
+            with csv_file:
+                writer = csv.writer(csv_file)
+                if include_header:
+                    writer.writerow(fieldnames)
+                for row in rows:
+                    writer.writerow([serialize_cell(row.get(column)) for column in fieldnames])
 
-            if include_header:
-                writer.writerow(fieldnames)
+            try:
+                result = subprocess.run(
+                    ["scp", tmp_path, dest],
+                    capture_output=True,
+                    text=True,
+                    timeout=SCP_TIMEOUT_SECONDS,
+                )
+            except FileNotFoundError:
+                return jsonify({"error": "scp no está disponible en este sistema"}), 500
+            except subprocess.TimeoutExpired:
+                return jsonify({"error": "Tiempo de espera agotado al transferir el archivo via scp"}), 500
 
-            for row in rows:
-                writer.writerow([serialize_cell(row.get(column)) for column in fieldnames])
-
-    except PermissionError:
-        return jsonify({"error": f"Sin permisos para escribir en: {unc_path}"}), 403
-    except OSError as exc:
-        return jsonify({"error": f"No se pudo escribir el archivo: {exc}"}), 500
+            if result.returncode != 0:
+                return jsonify({"error": f"scp falló: {result.stderr.strip()}"}), 500
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    else:
+        target_path = Path(dest)
+        try:
+            with target_path.open("w", newline="", encoding="utf-8-sig") as csv_file:
+                writer = csv.writer(csv_file)
+                if include_header:
+                    writer.writerow(fieldnames)
+                for row in rows:
+                    writer.writerow([serialize_cell(row.get(column)) for column in fieldnames])
+        except PermissionError:
+            return jsonify({"error": f"Sin permisos para escribir en: {dest}"}), 403
+        except OSError as exc:
+            return jsonify({"error": f"No se pudo escribir el archivo: {exc}"}), 500
 
     return jsonify(
         {
             "ok": True,
-            "path": unc_path,
+            "path": dest,
             "rows_written": len(rows),
             "columns": fieldnames,
             "header_written": include_header,
