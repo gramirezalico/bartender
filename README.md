@@ -1,6 +1,6 @@
 # servicePrint (Flask)
 
-API mínima en Flask con **un solo endpoint** para recibir JSON y guardarlo como CSV en una ruta local o UNC (por ejemplo `//10.100.2.54/SELLADOBIXOLON_TI$/EtiquetaTep.CSV`).
+API mínima en Flask con **un solo endpoint** para recibir JSON y guardarlo como CSV en una ruta local o en un servidor remoto vía SCP (por ejemplo `user@10.100.2.54:/srv/impresion/EtiquetaTep.CSV`).
 
 ## 1) Instalar dependencias
 
@@ -24,7 +24,7 @@ Servidor en `http://localhost:5000`.
 
 ```json
 {
-  "destination": "//10.100.2.54/SELLADOBIXOLON_TI$/EtiquetaTep.CSV",
+  "destination": "user@10.100.2.54:/srv/impresion/EtiquetaTep.CSV",
   "columns": [
     "Job",
     "Part",
@@ -84,11 +84,16 @@ Si no envías `columns`, se detectan automáticamente desde las llaves del JSON.
 ```bash
 curl -X POST http://localhost:5000/csv \
   -H "Content-Type: application/json" \
-  -d "{\"destination\":\"//10.100.2.54/SELLADOBIXOLON_TI$/EtiquetaTep.CSV\",\"data\":[{\"Job\":\"J1001\",\"Part\":\"P-01\"}]}"
+  -d "{\"destination\":\"user@10.100.2.54:/srv/impresion/EtiquetaTep.CSV\",\"data\":[{\"Job\":\"J1001\",\"Part\":\"P-01\"}]}"
 ```
 
 ## Notas de red/permiso
 
-- El usuario del proceso Python debe tener permisos de escritura sobre el recurso compartido.
-- Si ejecutas como servicio, valida la identidad del servicio (cuenta de dominio/servicio).
+- Para destinos SCP (`[user@]host:/ruta/archivo.csv`): el servidor donde corre la API debe tener acceso SSH sin contraseña interactiva al host remoto. Configura el acceso con clave pública:
+  ```bash
+  ssh-keygen -t ed25519        # genera par de claves si no existe
+  ssh-copy-id user@host        # copia la clave pública al host remoto
+  ssh user@host "echo ok"      # acepta el fingerprint del host la primera vez
+  ```
+- Para rutas locales (`/ruta/local/archivo.csv`): el usuario del proceso Python debe tener permisos de escritura.
 - El archivo se guarda con encoding `utf-8-sig` para buena compatibilidad en Excel.
